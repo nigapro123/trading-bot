@@ -1,0 +1,4 @@
+# Core dependencies for the XAUUSD trading bot
+MetaTrader5>=5.0.45   # Official MT5 Python API (Windows; or Linux/macOS via Wine)
+pandas>=2.0
+numpy>=1.24
