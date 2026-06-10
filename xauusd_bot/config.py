@@ -57,20 +57,30 @@ class Config:
     # If `adaptive_regime = False`, the fixed `mean_reversion` flag decides:
     #   True  -> always RSI mean-reversion (fade extremes, ignore trend/news/S-R)
     #   False -> always top-down trend-following (news/calendar gates active)
-    adaptive_regime: bool = False       # OFF: ADX no longer switches strategy
-    trend_strength_adx: float = 25.0    # (only used when adaptive_regime = True)
+    adaptive_regime: bool = True        # ON: ADX picks trend-following vs mean-reversion
+    trend_strength_adx: float = 15.0    # H1 ADX at/above this = trend -> follow it (lowered
+                                        # from 25 so grinding moves count as trends; lower
+                                        # still = trend-following even more of the time)
     adx_period: int = 14
-    mean_reversion: bool = True         # always RSI mean-reversion (the previous rule)
+    mean_reversion: bool = True         # used only when adaptive_regime = False
 
-    # Mean-reversion exits each trade on whichever comes first: RSI leaving the
-    # zone (while the bot runs), the ATR take-profit, or the ATR stop. Trend
-    # trades exit on their ATR take-profit / stop.
+    # Mean-reversion trade exit:
+    #   meanrev_rsi_exit = False (default) -> let winners RUN to the ATR
+    #       take-profit; trades close only on the TP or the stop (clean 1:1).
+    #   meanrev_rsi_exit = True -> also close as soon as RSI leaves its zone
+    #       (quick scalps, but tends to cut winners short).
+    meanrev_rsi_exit: bool = False
 
     ema_fast: int = 9
     ema_slow: int = 20
     rsi_period: int = 7
-    rsi_buy_level: float = 30.0     # buy when RSI(7) drops to this or lower
-    rsi_sell_level: float = 70.0    # sell when RSI(7) rises to this or higher
+    rsi_buy_level: float = 30.0     # RANGE (mean-reversion): buy when RSI(7) <= this
+    rsi_sell_level: float = 70.0    # RANGE (mean-reversion): sell when RSI(7) >= this
+    # TREND mode uses GENTLER pullback levels (you're trading WITH the trend, so a
+    # small pullback is enough): buy dips at <= trend_rsi_buy_level in an uptrend,
+    # sell rallies at >= trend_rsi_sell_level in a downtrend. More trend entries.
+    trend_rsi_buy_level: float = 40.0
+    trend_rsi_sell_level: float = 60.0
     atr_period: int = 14            # ATR sizes the STOP only — it is not a trend signal
 
     # --- VWAP filter (execution chart) --------------------------------------
@@ -79,6 +89,11 @@ class Config:
     # VWAP, while RSI mean-reversion entries fade the move from the other side.
     # Set `use_vwap_filter = False` to ignore VWAP entirely.
     use_vwap_filter: bool = True
+    # Tolerance band (fraction of price) that loosens the VWAP rule so price can
+    # sit a little on the "wrong" side of VWAP and still trigger -> MORE entries.
+    # 0.0 = strict; 0.0015 = 0.15% (~$6.5 on gold near $4,300); raise for even
+    # more trades. (Effectively disabled if use_vwap_filter = False.)
+    vwap_tolerance_pct: float = 0.0015
 
     # --- Top-down support/resistance filter ---------------------------------
     # Support/resistance are the highest high / lowest low over the last
@@ -90,10 +105,11 @@ class Config:
 
     # --- Position sizing: balance-tiered (NOT percent-risk) -----------------
     # Lot size scales with account size: `lots_per_step` lots for every
-    # `balance_per_step` of balance. Default = 0.01 lots per $100, increasing by
-    # 0.01 per additional $100 (e.g. $250 -> 0.02, $1000 -> 0.10). Below $100 the
-    # size is floored at the broker minimum (0.01) rather than skipped.
-    balance_per_step: float = 100.0   # every this much balance...
+    # `balance_per_step` of balance. Currently 0.01 lots per $1,000 (e.g. a
+    # ~$50k account trades ~0.50 lots). Below one step the size is floored at the
+    # broker minimum (0.01). For bigger size, lower `balance_per_step` (e.g. 100
+    # = 0.01 per $100, ~10x larger).
+    balance_per_step: float = 1000.0  # every this much balance...
     lots_per_step: float = 0.01       # ...adds this many lots
 
     # --- Stops / exits (tight, for scalping) --------------------------------

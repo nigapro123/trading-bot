@@ -185,8 +185,9 @@ def run_backtest(df: pd.DataFrame, cfg: Config, instrument: Instrument,
         # 1) Manage every open position against this bar's range.
         survivors = []
         for pos in positions:
-            # RSI-zone exit applies only to MEAN-REVERSION trades (tagged at open).
-            if pos["mode"] == "meanrev" and strategy.meanrev_exit(pos["side"], rsi_arr[t - 1], cfg):
+            # RSI-zone exit: mean-reversion trades only, and only if enabled.
+            if (getattr(cfg, "meanrev_rsi_exit", False) and pos["mode"] == "meanrev"
+                    and strategy.meanrev_exit(pos["side"], rsi_arr[t - 1], cfg)):
                 direction = 1.0 if pos["side"] == "buy" else -1.0
                 record(pos, opens[t] - direction * half_spread, "rsi", t)
                 continue

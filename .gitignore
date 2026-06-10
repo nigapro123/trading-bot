@@ -16,7 +16,12 @@ build/
 
 # Logs and data outputs
 *.log
-*.csv
+live_trades.csv
+trades_*.csv
+trades.csv
+ranking.csv
+gold_*.csv
+*.png
 
 # Secrets / credentials
 *.env

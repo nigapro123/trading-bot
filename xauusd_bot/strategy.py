@@ -179,6 +179,20 @@ def has_room(side: str, entry: float, tp_distance: float,
     return support is None or (entry - support) >= tp_distance
 
 
+def _vwap_sides(price: float, vwap_val: float, cfg):
+    """Return (below_ok, above_ok) for the VWAP filter, with a tolerance band.
+
+    A BUY needs `below_ok` (price at/under VWAP), a SELL needs `above_ok`. The
+    `vwap_tolerance_pct` widens each side so price can sit a little on the
+    "wrong" side of VWAP and still qualify (more RSI entries). 0 = strict;
+    `use_vwap_filter = False` or a missing VWAP disables the gate entirely.
+    """
+    if not getattr(cfg, "use_vwap_filter", False) or vwap_val != vwap_val:  # NaN
+        return True, True
+    tol = abs(vwap_val) * getattr(cfg, "vwap_tolerance_pct", 0.0)
+    return price <= vwap_val + tol, price >= vwap_val - tol
+
+
 # --- Core decision rule (shared by live bot AND backtest) --------------------
 
 def entry_from_values(ef_prev: float, es_prev: float, ef_last: float, es_last: float,
@@ -197,16 +211,16 @@ def entry_from_values(ef_prev: float, es_prev: float, ef_last: float, es_last: f
     the opposite side. With `use_vwap_filter = False` (or VWAP undefined) the
     VWAP check is skipped.
     """
+    # Trend mode uses the gentler trend pullback levels (e.g. 40/60), not the
+    # strict range levels (30/70) — you're entering WITH the trend.
+    buy_lvl = getattr(cfg, "trend_rsi_buy_level", cfg.rsi_buy_level)
+    sell_lvl = getattr(cfg, "trend_rsi_sell_level", cfg.rsi_sell_level)
     cross_up = ef_prev <= es_prev and ef_last > es_last
     cross_dn = ef_prev >= es_prev and ef_last < es_last
-    rsi_cross_os = rsi_prev > cfg.rsi_buy_level and rsi_last <= cfg.rsi_buy_level
-    rsi_cross_ob = rsi_prev < cfg.rsi_sell_level and rsi_last >= cfg.rsi_sell_level
+    rsi_cross_os = rsi_prev > buy_lvl and rsi_last <= buy_lvl
+    rsi_cross_ob = rsi_prev < sell_lvl and rsi_last >= sell_lvl
 
-    if not getattr(cfg, "use_vwap_filter", False) or vwap_val != vwap_val:  # NaN
-        above = below = True
-    else:
-        above = price >= vwap_val
-        below = price <= vwap_val
+    below, above = _vwap_sides(price, vwap_val, cfg)
 
     buy = htf_dir == "up" and ((cross_up and above) or (rsi_cross_os and below))
     sell = htf_dir == "down" and ((cross_dn and below) or (rsi_cross_ob and above))
@@ -229,11 +243,7 @@ def meanrev_entry(rsi_prev: float, rsi_last: float, price: float, vwap_val: floa
     """
     os_ = rsi_prev > cfg.rsi_buy_level and rsi_last <= cfg.rsi_buy_level
     ob = rsi_prev < cfg.rsi_sell_level and rsi_last >= cfg.rsi_sell_level
-    if not getattr(cfg, "use_vwap_filter", False) or vwap_val != vwap_val:  # NaN
-        below = above = True
-    else:
-        below = price <= vwap_val
-        above = price >= vwap_val
+    below, above = _vwap_sides(price, vwap_val, cfg)
     if os_ and below:
         return "buy"
     if ob and above:
@@ -301,12 +311,15 @@ def entry_debug(df: pd.DataFrame, df_htf: pd.DataFrame, cfg) -> str | None:
     d = compute_indicators(df, cfg)
     last, prev = d.iloc[-2], d.iloc[-3]
     rsi_l, rsi_p = last["rsi"], prev["rsi"]
-    in_buy = rsi_l <= cfg.rsi_buy_level
-    in_sell = rsi_l >= cfg.rsi_sell_level
+    meanrev = use_mean_reversion(df_htf, cfg)
+    # Range mode uses the strict 30/70 levels; trend mode the gentler 40/60.
+    buy_lvl = cfg.rsi_buy_level if meanrev else getattr(cfg, "trend_rsi_buy_level", cfg.rsi_buy_level)
+    sell_lvl = cfg.rsi_sell_level if meanrev else getattr(cfg, "trend_rsi_sell_level", cfg.rsi_sell_level)
+    in_buy = rsi_l <= buy_lvl
+    in_sell = rsi_l >= sell_lvl
     if not (in_buy or in_sell):
         return None
 
-    meanrev = use_mean_reversion(df_htf, cfg)
     htf = htf_trend(df_htf, cfg)
     price, vw = last["close"], last["vwap"]
     zone = "oversold(buy)" if in_buy else "overbought(sell)"
@@ -317,19 +330,18 @@ def entry_debug(df: pd.DataFrame, df_htf: pd.DataFrame, cfg) -> str | None:
     if not meanrev:
         head += f" H1trend={htf}"
 
-    crossed = (in_buy and rsi_p > cfg.rsi_buy_level) or (in_sell and rsi_p < cfg.rsi_sell_level)
+    crossed = (in_buy and rsi_p > buy_lvl) or (in_sell and rsi_p < sell_lvl)
     if not crossed:
         return head + " -> no fresh cross (RSI already in the zone on the prior bar)"
 
-    vwap_on = getattr(cfg, "use_vwap_filter", False) and vw == vw
     if not meanrev:   # trend mode also needs the H1 trend to agree
         if in_buy and htf != "up":
             return head + " -> TREND mode won't buy oversold unless H1 is UP"
         if in_sell and htf != "down":
             return head + " -> TREND mode won't sell overbought unless H1 is DOWN"
-    if vwap_on:
-        if in_buy and price > vw:
-            return head + f" -> price {price:.2f} ABOVE VWAP {vw:.2f}; buy needs price <= VWAP"
-        if in_sell and price < vw:
-            return head + f" -> price {price:.2f} BELOW VWAP {vw:.2f}; sell needs price >= VWAP"
+    below_ok, above_ok = _vwap_sides(price, vw, cfg)   # honours the tolerance band
+    if in_buy and not below_ok:
+        return head + f" -> price {price:.2f} too far ABOVE VWAP {vw:.2f} (tol); buy needs price near/below VWAP"
+    if in_sell and not above_ok:
+        return head + f" -> price {price:.2f} too far BELOW VWAP {vw:.2f} (tol); sell needs price near/above VWAP"
     return head + " -> conditions met; blocked later by spread, open-slots, news or S/R"

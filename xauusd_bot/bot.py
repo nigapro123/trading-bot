@@ -35,6 +35,7 @@ class LiveState:
     known: dict = field(default_factory=dict)   # ticket -> {risk, side, lots, mode}
     pending_risk: float | None = None           # risk_amount of the trade just sent
     pending_mode: str | None = None             # "meanrev"/"trend" of the trade just sent
+    journaled: set = field(default_factory=set) # tickets already written (dedup)
 
 
 def _reconcile(cfg: Config, state: LiveState, positions, equity: float) -> None:
@@ -53,7 +54,7 @@ def _reconcile(cfg: Config, state: LiveState, positions, equity: float) -> None:
         if ticket not in current:
             realized = client.position_realized_pnl(ticket)
             info = state.known.pop(ticket)
-            if realized is not None:
+            if realized is not None and str(ticket) not in state.journaled:
                 risk_amt = info.get("risk")
                 state.journal.append({
                     "time": datetime.now().isoformat(timespec="seconds"),
@@ -62,7 +63,30 @@ def _reconcile(cfg: Config, state: LiveState, positions, equity: float) -> None:
                     "r": round(realized / risk_amt, 3) if risk_amt else "",
                     "equity_after": round(equity, 2),
                 })
+                state.journaled.add(str(ticket))
                 log.info("Journaled closed trade %s: pnl=%.2f", ticket, realized)
+
+
+def _history_reconcile(cfg: Config, state: LiveState, equity: float) -> None:
+    """Backstop: journal any closed bot position missing from the journal — e.g.
+    one that closed while the bot was restarted — straight from MT5 history."""
+    try:
+        closed = client.closed_positions(cfg.symbol, cfg.magic)
+    except Exception as exc:   # never let journaling break the trading loop
+        log.debug("History reconcile failed: %s", exc)
+        return
+    for cp in closed:
+        tkt = str(cp["ticket"])
+        if tkt in state.journaled:
+            continue
+        state.journal.append({
+            "time": cp["time"], "ticket": cp["ticket"], "side": cp["side"],
+            "lots": cp["lots"], "pnl": cp["pnl"], "r": "",
+            "equity_after": round(equity, 2),
+        })
+        state.journaled.add(tkt)
+        log.info("Journaled (from history) closed trade %s: pnl=%.2f",
+                 cp["ticket"], cp["pnl"])
 
 
 def _setup_logging() -> None:
@@ -82,6 +106,7 @@ def on_new_bar(cfg: Config, symbol_info, guard: risk.EquityFloorGuard, df, df_ht
 
     positions = client.open_positions(cfg.symbol, cfg.magic)
     _reconcile(cfg, state, positions, acc.equity)
+    _history_reconcile(cfg, state, acc.equity)   # catch any closes missed across restarts
 
     if guard.trading_halted(acc.equity):
         # 70% equity floor reached: stop trading and close any open bot position.
@@ -92,10 +117,10 @@ def on_new_bar(cfg: Config, symbol_info, guard: risk.EquityFloorGuard, df, df_ht
                 client.close_position(p, cfg.deviation, cfg.magic)
         return
 
-    # Active RSI-zone exit for MEAN-REVERSION trades only (tagged when opened).
-    # Trend trades are left to their SL/TP. Positions whose mode is unknown
-    # (e.g. after a restart) are left to SL/TP too.
-    if positions:
+    # Active RSI-zone exit for MEAN-REVERSION trades only (tagged when opened),
+    # and only if enabled. Off by default so winners run to the TP. Trend trades
+    # and unknown-mode positions are always left to their SL/TP.
+    if cfg.meanrev_rsi_exit and positions:
         rsi_now = strategy.last_rsi(df, cfg)
         for p in positions:
             if state.known.get(p.ticket, {}).get("mode") != "meanrev":
@@ -197,6 +222,7 @@ def run(cfg: Config) -> None:
             client.account_info().balance, cfg.equity_floor_frac, cfg.equity_floor_buffer
         )
         state = LiveState(journal=Journal("live_trades.csv"))
+        state.journaled = state.journal.known_tickets()   # don't re-write existing rows
         news_feed = news.NewsBiasFeed(cfg) if cfg.use_news_bias else None
         last_bar_time = None
         log.info("Trading %s on %s (trend/S-R from %s, news bias %s). Polling every %ds. Ctrl+C to stop.",

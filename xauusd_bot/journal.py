@@ -23,3 +23,16 @@ class Journal:
         clean = {k: row.get(k, "") for k in FIELDS}
         with open(self.path, "a", newline="") as f:
             csv.DictWriter(f, fieldnames=FIELDS).writerow(clean)
+
+    def known_tickets(self) -> set:
+        """Position tickets already recorded — used to avoid duplicate rows."""
+        tickets = set()
+        try:
+            with open(self.path, newline="") as f:
+                for row in csv.DictReader(f):
+                    t = row.get("ticket")
+                    if t:
+                        tickets.add(str(t))
+        except FileNotFoundError:
+            pass
+        return tickets

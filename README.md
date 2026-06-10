@@ -1,9 +1,10 @@
 # XAUUSD Trading Bot (MetaTrader 5)
 
 A small, readable trading bot for the **gold / USD (XAUUSD)** pair. It connects to
-a MetaTrader 5 broker account, evaluates an EMA-crossover + RSI strategy on closed
-bars, sizes positions by a fixed percent-risk rule, and manages exits with
-ATR-based stop loss / take profit.
+a MetaTrader 5 broker account and, on closed bars, runs a configurable strategy —
+**RSI mean-reversion by default**, with optional ADX-driven regime switching and a
+top-down trend-following mode. It sizes positions from the account balance and
+manages exits with ATR-based stop loss / take profit.
 
 > ⚠️ **This is an educational starting template, not a profitable strategy.**
 > Automated trading can lose money quickly. Run it on a **demo account** with
@@ -12,57 +13,57 @@ ATR-based stop loss / take profit.
 
 ## What it does
 
-> **Adaptive regime (default, `adaptive_regime = True`).** The bot reads trend
-> STRENGTH from **ADX on the H1 chart** and picks the strategy per bar:
+> **Current setup: pure RSI mean-reversion on M1.** With the `config.py` defaults
+> (`adaptive_regime = False`, `mean_reversion = True`) the bot fades RSI extremes
+> on the execution chart:
 >
-> - **Strong trend** (ADX ≥ `trend_strength_adx`, 25) → **trend-following**: buys
->   in H1 uptrends / sells in H1 downtrends, via EMA(9/20) crosses or trend-aligned
->   RSI entries, with the news/calendar and S/R filters active. Exits on ATR
->   take-profit / stop.
-> - **Weak / ranging** (ADX < threshold) → **RSI mean-reversion**: BUYS when RSI(7)
->   crosses ≤ `rsi_buy_level`, SELLS when it crosses ≥ `rsi_sell_level` (VWAP only,
->   ignores trend/news/S-R), and closes when RSI leaves the zone (or ATR TP/stop).
->
-> Each trade is tagged with the mode that opened it, so it's exited the right way.
-> Set `adaptive_regime = False` to force a single style with the `mean_reversion`
-> flag (`True` = always mean-reversion, `False` = always trend-following). The
-> per-filter details below apply to the trend-following side.
+> - **BUY** when RSI(7) crosses down to ≤ `rsi_buy_level` (**30**) and price is at
+>   or below VWAP.
+> - **SELL** when RSI(7) crosses up to ≥ `rsi_sell_level` (**70**) and price is at
+>   or above VWAP.
+> - Each trade exits on its **ATR take-profit (1:1) or ATR stop** — winners run to
+>   the target. The quick RSI-zone exit is **off** by default; set
+>   `meanrev_rsi_exit = True` to re-enable it (closes the moment RSI leaves the
+>   zone — quicker scalps, but cuts winners short).
+> - Trend, news, calendar and S/R filters are **ignored** in this mode; only VWAP
+>   confirms. Up to **3 positions** at once.
 
-1. Connects to your MT5 terminal/account.
-2. **Top-down, two timeframes.** It reads the broader trend and key
-   support/resistance from a *higher* timeframe (H1 by default) and executes on
-   a *lower* one (M5 by default; drop to M1 for faster scalps).
-3. **Trend filter (higher TF):** EMA9 vs EMA20 on H1 sets the allowed
-   direction — only longs in an uptrend, only shorts in a downtrend.
-4. **Execution triggers (lower TF):** within the allowed direction, EITHER an
-   EMA(9/20) crossover OR an RSI(7) extreme (crossing ≤ 20 to buy / ≥ 80 to
-   sell) opens a trade. (ATR(14) is also computed, but only to size the stop.)
-5. **VWAP filter (lower TF):** a daily-anchored VWAP confirms each trigger on its
-   natural side — trend crosses on the trend side of VWAP, RSI reversions from
-   the other side. Toggle with `use_vwap_filter`.
-6. **Support/resistance gate:** skips an entry if its take-profit wouldn't fit
-   before the nearest higher-TF level (no room to run). Toggle with
-   `use_sr_filter`.
-7. **News bias (live only):** pulls news from RSS (FXStreet first, Google News
-   as a no-VPN fallback) **and** scheduled USD releases from FXStreet's economic
-   calendar API. Headlines are scored bullish/bearish-for-gold; calendar releases
-   add a **data surprise** read (Actual beats Consensus ⇒ stronger USD ⇒ bearish
-   gold; a miss ⇒ bullish), weighted by impact. The two scores are summed: bullish
-   ⇒ buys only, bearish ⇒ sells only, neutral ⇒ no constraint. Everything counts
-   only after it is `news_min_age_minutes` (5) old, so it acts *after* the spike,
-   never into it, and it never pauses the bot by itself. Backtests ignore this.
-   Check the reads with `python -m xauusd_bot.news` and `python -m
-   xauusd_bot.econ_calendar`. Toggle with `use_news_bias` / `use_calendar_bias`.
-8. **Position size by account balance:** 0.01 lots per $100, increasing 0.01 per
-   additional $100 (e.g. $1,000 → 0.10 lots). Below $100 it still trades the
-   0.01 minimum. The stop is ATR-based, and the take-profit uses a
-   **volatility-adaptive reward:risk** — `1:1` when ATR is elevated (≥
-   `high_vol_atr_mult`× its `atr_avg_period` average) and `1:1.5` in normal
-   conditions.
-9. Holds up to **3 positions** at once; each exit is handled by its own SL/TP.
-10. **Account protection floor:** once equity reaches ~70% of the balance it
-   started with (it triggers a touch early, ~72%), it closes any open position
-   and stops trading for good.
+These always apply, in every mode:
+
+1. Connects to your MT5 terminal/account and acts on **closed** bars.
+2. **Position size by balance:** `lots_per_step` (0.01) lots per `balance_per_step`
+   ($1,000) of balance — e.g. a ~$50k account trades ~**0.50 lots**, floored at
+   the 0.01 broker minimum. Lower `balance_per_step` for larger size.
+3. **Reward:risk** is a flat **1:1** (`reward_risk` = `reward_risk_high_vol` = 1.0).
+   It can adapt to volatility — set `reward_risk_high_vol` below `reward_risk`
+   (e.g. 1.0 vs 1.5) to use a wider target in calm markets and tighten in volatile
+   ones (ATR ≥ `high_vol_atr_mult` × its `atr_avg_period` average).
+4. **Account-protection floor:** once equity falls to ~70% of the balance it
+   started with (triggers a touch early, ~72%), it closes any open position and
+   stops trading for good.
+
+### Optional modes
+
+Two other styles are built in and toggled in `config.py`:
+
+- `adaptive_regime = True` — auto-switch by trend STRENGTH: **H1 ADX ≥
+  `trend_strength_adx` (25)** → trend-following, otherwise RSI mean-reversion.
+- `mean_reversion = False` (with `adaptive_regime = False`) — always **top-down
+  trend-following**.
+
+The trend-following side adds these filters (all ignored by the mean-reversion
+default above):
+
+- **Top-down, two timeframes:** trend + key support/resistance from H1, execution
+  on M1/M5. EMA9 vs EMA20 on H1 sets the allowed direction.
+- **Triggers:** an EMA(9/20) crossover OR a trend-aligned RSI(7) extreme.
+- **VWAP filter** and **S/R gate** (`use_vwap_filter` / `use_sr_filter`).
+- **News bias (live only):** FXStreet RSS (Google News as a no-VPN fallback) plus
+  the FXStreet economic-calendar surprise (Actual vs Consensus, impact-weighted),
+  summed to bias direction — bullish ⇒ buys only, bearish ⇒ sells only. Counts
+  only after `news_min_age_minutes` (5). Check with `python -m xauusd_bot.news`
+  and `python -m xauusd_bot.econ_calendar`; toggle `use_news_bias` /
+  `use_calendar_bias`.
 
 ## Requirements
 
@@ -104,8 +105,9 @@ python -m xauusd_bot.bot --list-symbols
 
 Set the right one via `MT5_SYMBOL` or by editing `symbol` in `config.py`.
 
-All other tunables (timeframe, indicator periods, risk %, ATR multiples,
-spread/daily-loss limits) live in `config.py` with inline comments.
+All other tunables (timeframes, indicator periods, RSI levels, balance-based
+sizing, ATR multiples, spread limit, the 70% equity floor, news/calendar) live in
+`config.py` with inline comments.
 
 ## Run
 
@@ -132,8 +134,8 @@ risk, you can set `dry_run = False` in `config.py`.
 |-------------------|------------------------------------------------------------|
 | `config.py`       | All settings, with safe defaults (`dry_run=True`).         |
 | `mt5_client.py`   | Everything that talks to MT5: data, orders, positions.     |
-| `strategy.py`     | Indicators + the single shared decision rule. No MT5 dep.  |
-| `risk.py`         | Position sizing (gold 100 oz contract) + daily-loss guard. |
+| `strategy.py`     | Indicators (EMA/RSI/ATR/VWAP/ADX) + the shared decision rules. No MT5 dep. |
+| `risk.py`         | Balance-based position sizing (gold 100 oz) + 70% equity floor. |
 | `bot.py`          | Live polling loop + CLI + trade journaling.                |
 | `data.py`         | CSV loader, synthetic data, MT5 history export.            |
 | `backtest.py`     | Event-driven backtester (reuses strategy + risk).          |
@@ -141,6 +143,9 @@ risk, you can set `dry_run = False` in `config.py`.
 | `metrics.py`      | Shared performance metrics for backtest AND live.          |
 | `journal.py`      | Append-only CSV of closed live trades.                     |
 | `analyze_live.py` | Scores the live journal with the same metrics.             |
+| `news.py`         | FXStreet/Google-News RSS bias (live only).                 |
+| `econ_calendar.py`| FXStreet economic-calendar surprise bias (live only).      |
+| `connect_test.py` | Read-only MT5 connection diagnostic.                       |
 
 ## Backtesting
 

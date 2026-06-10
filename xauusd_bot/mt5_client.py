@@ -6,6 +6,7 @@ stays broker-agnostic and easy to test.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 
 import MetaTrader5 as mt5
 import pandas as pd
@@ -100,6 +101,42 @@ def open_positions(symbol: str, magic: int) -> list:
     if positions is None:
         return []
     return [p for p in positions if p.magic == magic]
+
+
+def closed_positions(symbol: str, magic: int, lookback_days: int = 3) -> list:
+    """Closed bot positions from MT5 deal history (restart-proof, broker truth).
+
+    Returns one dict per CLOSED position matched on `magic`:
+        {ticket, time (ISO), side, lots, pnl}
+    Reads the permanent deal history rather than in-memory state, so trades that
+    closed while the bot was restarted are still captured.
+    """
+    deals = mt5.history_deals_get(datetime.now() - timedelta(days=lookback_days),
+                                  datetime.now() + timedelta(days=1))
+    if not deals:
+        return []
+    by_pos: dict = {}
+    for d in deals:
+        if d.symbol != symbol or d.magic != magic:
+            continue
+        by_pos.setdefault(d.position_id, []).append(d)
+
+    result = []
+    for pid, ds in by_pos.items():
+        # A position is closed once it has a non-IN deal (OUT/INOUT/OUT_BY).
+        if not any(getattr(d, "entry", 0) != 0 for d in ds):
+            continue
+        pnl = sum(d.profit + getattr(d, "swap", 0.0) + getattr(d, "commission", 0.0)
+                  for d in ds)
+        in_deal = next((d for d in ds if getattr(d, "entry", 0) == 0), ds[0])
+        side = "buy" if in_deal.type == 0 else "sell"   # DEAL_TYPE_BUY == 0
+        close_time = max(d.time for d in ds)
+        result.append({
+            "ticket": pid,
+            "time": datetime.fromtimestamp(close_time).isoformat(timespec="seconds"),
+            "side": side, "lots": in_deal.volume, "pnl": round(pnl, 2),
+        })
+    return result
 
 
 def _filling_mode(symbol_info):
